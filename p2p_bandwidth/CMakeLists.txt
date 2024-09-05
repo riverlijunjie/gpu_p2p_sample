@@ -1,0 +1,4 @@
+add_executable(ocl_p2p_bandwidth_test ocl_p2p_bandwidth.cpp)
+
+target_compile_options(ocl_p2p_bandwidth_test PRIVATE -ggdb -O0)
+target_link_libraries(ocl_p2p_bandwidth_test OpenCL)
