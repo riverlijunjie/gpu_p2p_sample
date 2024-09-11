@@ -277,8 +277,16 @@ void run_queue_sync_test(bool is_event_sync_mode, size_t bytes_size, cl_device_i
     const std::chrono::duration<double, std::milli> elapsed_1 = end_1 - start_1;
     std::cout << "Copy time: " << elapsed_1.count() << " ms, size = " << size / 1024 << " KB, BandWidth = " << size/1024.0/1024/1024/elapsed_1.count()*1000 << " GB/s" << std::endl;
 
-
-    err = clEnqueueReadBuffer(queue_2, bufD, CL_TRUE, 0, sizeof(int8_t) * size, result.data(), 0, nullptr, nullptr);
+    err = clEnqueueReadBuffer(queue_2, bufB, CL_TRUE, 0, sizeof(int8_t) * size, result.data(), 0, nullptr, nullptr);
+    size_t cnt = 0;
+    for (int i = 0; i < size; i += 1)
+    {
+        if (A[i] != result[i])
+        {
+            cnt += 1;
+        }
+    }
+    printf("GPU P2P between different gpu devices: %s(%.3f)\n", cnt == 0 ? "SUCCESS" : "FAIL", 1.0 * cnt / size);
 
     // Set the kernel arguments
     clSetKernelArg(kernel, 0, sizeof(cl_mem), &bufB);
@@ -305,7 +313,7 @@ void run_queue_sync_test(bool is_event_sync_mode, size_t bytes_size, cl_device_i
     err = clEnqueueReadBuffer(queue_2, bufD, CL_TRUE, 0, sizeof(int8_t) * size, result.data(), 0, nullptr, nullptr);
     CHECK_OCL_ERROR_EXIT(err, "clEnqueueReadBuffer failed");
 
-    size_t cnt = 0;
+    cnt = 0;
     for (int i = 0; i < size; i += 1)
     {
         if (A[i] + C[i] != result[i])
@@ -316,11 +324,11 @@ void run_queue_sync_test(bool is_event_sync_mode, size_t bytes_size, cl_device_i
 
     if (is_event_sync_mode)
     {
-        printf("Use event to sync queues between different gpu devices: %s(%.3f)\n\n", cnt == 0 ? "SUCCESS" : "FAIL", 1.0*cnt/size);
+        printf("Use event to sync queues between different gpu devices: %s(%.3f)\n\n", cnt == 0 ? "SUCCESS" : "FAIL", 1.0 * cnt / size);
     }
     else
     {
-        printf("Use clFinish to sync queues between different gpu devices: %s(%.3f)\n\n", cnt == 0 ? "SUCCESS" : "FAIL", 1.0*cnt/size);
+        printf("Use clFinish to sync queues between different gpu devices: %s(%.3f)\n\n", cnt == 0 ? "SUCCESS" : "FAIL", 1.0 * cnt / size);
     }
 
     clReleaseMemObject(bufA);
@@ -352,11 +360,13 @@ int main(int argc, char **argv)
     const int data_size[] = {1, 4, 128, 512};
     cl_device_id device_1 = choose_ocl_device(gpu_0);
     cl_device_id device_2 = choose_ocl_device(gpu_1);
-    std::cout << std::endl << std::endl;
-    for(int k = 0; k < cnt; k++) {
+    std::cout << std::endl
+              << std::endl;
+    for (int k = 0; k < cnt; k++)
+    {
         // Test queue sync between different contexts
         std::cout << "Loop count: " << k << " ......................" << std::endl;
-	std::cout << "GPU index: " << gpu_0 << "-->" << gpu_1 << std::endl;
+        std::cout << "GPU index: " << gpu_0 << "-->" << gpu_1 << std::endl;
         run_queue_sync_test(0, bytes, device_1, device_2); // manual sync(clFinish) will sucess
         std::cout << "GPU index: " << gpu_1 << "-->" << gpu_0 << std::endl;
         run_queue_sync_test(0, bytes, device_2, device_1); // manual sync(clFinish) will sucess
