@@ -6,7 +6,12 @@
 #include <CL/cl.h>
 #include <CL/cl_ext.h>
 #include <map>
+#include <thread>
+#include <chrono>
+#include <cstdlib>
+#include <ctime>
 
+#define CL_MEM_ALLOW_UNRESTRICTED_SIZE_INTEL (1 << 23)
 static std::map<int, std::string> oclErrorCode =
     {
         {0, "CL_SUCCESS"},
@@ -191,11 +196,64 @@ cl_device_id choose_ocl_device(size_t id = 0)
     return 0;
 }
 
-void run_queue_sync_test(bool is_event_sync_mode, size_t bytes_size, cl_device_id device_1, cl_device_id device_2)
+void test_gpu_bandwidth(bool is_event_sync_mode, cl_device_id device_1, size_t bytes_size)
 {
-    //cl_device_id device_1 = choose_ocl_device(0);
-    //cl_device_id device_2 = choose_ocl_device(1);
+    // cl_device_id device_1 = choose_ocl_device(0);
+    cl_context context_1 = clCreateContext(nullptr, 1, &device_1, nullptr, nullptr, nullptr);
 
+    cl_command_queue_properties props[] = {CL_QUEUE_PROPERTIES, 0, 0};
+    cl_command_queue queue_1 = clCreateCommandQueueWithProperties(context_1, device_1, props, nullptr);
+
+    cl_int err;
+    cl_mem bufA = clCreateBuffer(context_1, CL_MEM_READ_WRITE | CL_MEM_ALLOW_UNRESTRICTED_SIZE_INTEL, bytes_size, nullptr, nullptr);
+    cl_mem bufB = clCreateBuffer(context_1, CL_MEM_READ_WRITE | CL_MEM_ALLOW_UNRESTRICTED_SIZE_INTEL, bytes_size, nullptr, nullptr);
+
+    int8_t* result = (int8_t *)malloc(bytes_size);
+    double bandwidth_gpu_gpu = 0.0;
+    double bandwidth_gpu_cpu = 0.0;
+    size_t loop_cnt = 3;
+
+    for (size_t loop = 0; loop < loop_cnt; loop++)
+    {
+        cl_event event;
+        const auto start_1 = std::chrono::high_resolution_clock::now();
+        if (is_event_sync_mode)
+        {
+            err = clEnqueueCopyBuffer(queue_1, bufA, bufB, 0, 0, bytes_size, 0, nullptr, &event);
+            clWaitForEvents(1, &event);
+        }
+        else
+        {
+            err = clEnqueueCopyBuffer(queue_1, bufA, bufB, 0, 0, bytes_size, 0, nullptr, nullptr);
+            clFinish(queue_1);
+        }
+        CHECK_OCL_ERROR_EXIT(err, "clEnqueueCopyBuffer failed");
+
+        const auto end_1 = std::chrono::high_resolution_clock::now();
+        const std::chrono::duration<double, std::milli> elapsed_1 = end_1 - start_1;
+        bandwidth_gpu_gpu += bytes_size / 1024.0 / 1024 / 1024 / elapsed_1.count() * 1000;
+        std::cout << "\tGPU->GPU copy " << loop << ": time = " << elapsed_1.count() << " ms, size = " << bytes_size / 1024 << " KB, BandWidth = " << bytes_size / 1024.0 / 1024 / 1024 / elapsed_1.count() * 1000 << " GB/s" << std::endl;
+
+        const auto start_2 = std::chrono::high_resolution_clock::now();
+        err = clEnqueueReadBuffer(queue_1, bufB, CL_TRUE, 0, sizeof(int8_t) * bytes_size, result, 0, nullptr, nullptr);
+        const auto end_2 = std::chrono::high_resolution_clock::now();
+        const std::chrono::duration<double, std::milli> elapsed_2 = end_2 - start_2;
+        bandwidth_gpu_cpu += bytes_size / 1024.0 / 1024 / 1024 / elapsed_2.count() * 1000;
+        std::cout << "\tGPU->CPU copy " << loop << ": time = " << elapsed_2.count() << " ms, size = " << bytes_size / 1024 << " KB, BandWidth = " << bytes_size / 1024.0 / 1024 / 1024 / elapsed_2.count() * 1000 << " GB/s" << std::endl;
+    }
+
+    std::cout << "GPU->GPU bandwidh = " << bandwidth_gpu_gpu/loop_cnt << " GB/s" << std::endl;
+    std::cout << "GPU->CPU bandwidh = " << bandwidth_gpu_cpu/loop_cnt << " GB/s" << std::endl; 
+
+    free(result);
+    clReleaseMemObject(bufA);
+    clReleaseMemObject(bufB);
+    clReleaseCommandQueue(queue_1);
+    clReleaseContext(context_1);
+}
+
+void test_p2p_bandwidth(bool is_event_sync_mode, size_t bytes_size, cl_device_id device_1, cl_device_id device_2)
+{
     cl_context context_1 = clCreateContext(nullptr, 1, &device_1, nullptr, nullptr, nullptr);
     cl_context context_2 = clCreateContext(nullptr, 1, &device_2, nullptr, nullptr, nullptr);
 
@@ -203,140 +261,51 @@ void run_queue_sync_test(bool is_event_sync_mode, size_t bytes_size, cl_device_i
     cl_command_queue queue_1 = clCreateCommandQueueWithProperties(context_1, device_1, props, nullptr);
     cl_command_queue queue_2 = clCreateCommandQueueWithProperties(context_2, device_2, props, nullptr);
 
-    const size_t size = bytes_size;// 128 * 1024 * 1024; // 128MB
-    std::vector<uint8_t> A(size, 0x3);
-    std::vector<uint8_t> C(size, 0x7);
-    cl_mem bufA = clCreateBuffer(context_1, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(int8_t) * size, A.data(), nullptr);
-    cl_mem bufB = clCreateBuffer(context_2, CL_MEM_READ_WRITE, sizeof(int8_t) * size, nullptr, nullptr);
-    cl_mem bufC = clCreateBuffer(context_2, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(int8_t) * size, C.data(), nullptr);
-    cl_mem bufD = clCreateBuffer(context_2, CL_MEM_READ_WRITE, sizeof(int8_t) * size, nullptr, nullptr);
+    cl_int err;
+    const size_t size = bytes_size;
+    cl_mem bufA = clCreateBuffer(context_1, CL_MEM_READ_WRITE | CL_MEM_ALLOW_UNRESTRICTED_SIZE_INTEL, bytes_size, nullptr, nullptr);
+    cl_mem bufB = clCreateBuffer(context_2, CL_MEM_READ_WRITE | CL_MEM_ALLOW_UNRESTRICTED_SIZE_INTEL, bytes_size, nullptr, nullptr);
 
-    uint64_t fd;
-    cl_int err = clGetMemObjectInfo(bufB, CL_MEM_ALLOCATION_HANDLE_INTEL, sizeof(fd), &fd, NULL);
-    CHECK_OCL_ERROR_EXIT(err, "clGetMemObjectInfo failed");
-
-    cl_mem_properties extMemProperties[] = {
-        (cl_mem_properties)CL_EXTERNAL_MEMORY_HANDLE_DMA_BUF_KHR,
-        (cl_mem_properties)fd,
-        0};
-    cl_mem shared_mem = clCreateBufferWithProperties(context_1, extMemProperties, 0, size, NULL, &err);
-    CHECK_OCL_ERROR_EXIT(err, "clCreateBufferWithProperties failed");
-
-    // Define the kernel source code
-    const char *kernelSource = R"(
-        __kernel void matrix_add(__global const char* A, __global const char* B, __global char* C) {
-            int i = get_global_id(0);
-            int j = get_global_id(1);
-            int index = i * get_global_size(1) + j;
-            C[index] = A[index] + B[index];
-            // printf("%d + %d = %d\n",A[index],B[index],C[index]);
-        }
-    )";
-    // Create a program from the kernel source
-    cl_uint knlcount = 1;
-    const char *knlstrList[] = {kernelSource};
-    size_t knlsizeList[] = {strlen(kernelSource)};
-    cl_program program = clCreateProgramWithSource(context_2, knlcount, knlstrList, knlsizeList, &err);
-    CHECK_OCL_ERROR_EXIT(err, "clCreateProgramWithSource failed");
-
-    std::string buildopt = "-cl-std=CL2.0 -cl-intel-greater-than-4GB-buffer-required";
-    err = clBuildProgram(program, 1, &device_2, buildopt.c_str(), nullptr, nullptr);
-    if (err < 0)
+    cl_mem shared_mem;
+    double bandwidth = 0.0;
+    size_t loop_cnt = 3;
+    for (size_t loop = 0; loop < loop_cnt; loop++)
     {
-        size_t logsize = 0;
-        err = clGetProgramBuildInfo(program, device_2, CL_PROGRAM_BUILD_LOG, 0, nullptr, &logsize);
-        CHECK_OCL_ERROR_EXIT(err, "clGetProgramBuildInfo failed");
+        uint64_t fd;
+        err = clGetMemObjectInfo(bufB, CL_MEM_ALLOCATION_HANDLE_INTEL, sizeof(fd), &fd, NULL);
+        CHECK_OCL_ERROR_EXIT(err, "clGetMemObjectInfo failed");
 
-        std::vector<char> logbuf(logsize + 1, 0);
-        err = clGetProgramBuildInfo(program, device_2, CL_PROGRAM_BUILD_LOG, logsize + 1, logbuf.data(), nullptr);
-        CHECK_OCL_ERROR_EXIT(err, "clGetProgramBuildInfo failed");
-        printf("%s\n", logbuf.data());
+        cl_mem_properties extMemProperties[] = {
+            (cl_mem_properties)CL_EXTERNAL_MEMORY_HANDLE_DMA_BUF_KHR,
+            (cl_mem_properties)fd,
+            0};
+        shared_mem = clCreateBufferWithProperties(context_1, extMemProperties, 0, size, NULL, &err);
+        CHECK_OCL_ERROR_EXIT(err, "clCreateBufferWithProperties failed");
 
-        exit(1);
-    }
-    // Create the kernel
-    cl_kernel kernel = clCreateKernel(program, "matrix_add", &err);
-    CHECK_OCL_ERROR_EXIT(err, "clCreateKernel failed");
-
-    std::vector<uint8_t> result(size, 0x0);
-    cl_event event;
-    const auto start_1 = std::chrono::high_resolution_clock::now();
-    if (is_event_sync_mode)
-    {
-        err = clEnqueueCopyBuffer(queue_1, bufA, shared_mem, 0, 0, size, 0, nullptr, &event);
-        clWaitForEvents(1, &event);
-    }
-    else
-    {
-        err = clEnqueueCopyBuffer(queue_1, bufA, shared_mem, 0, 0, size, 0, nullptr, nullptr);
-        clFinish(queue_1);
-    }
-    CHECK_OCL_ERROR_EXIT(err, "clEnqueueCopyBuffer failed");
-
-    const auto end_1 = std::chrono::high_resolution_clock::now();
-    const std::chrono::duration<double, std::milli> elapsed_1 = end_1 - start_1;
-    std::cout << "Copy time: " << elapsed_1.count() << " ms, size = " << size / 1024 << " KB, BandWidth = " << size/1024.0/1024/1024/elapsed_1.count()*1000 << " GB/s" << std::endl;
-
-    err = clEnqueueReadBuffer(queue_2, bufB, CL_TRUE, 0, sizeof(int8_t) * size, result.data(), 0, nullptr, nullptr);
-    size_t cnt = 0;
-    for (size_t i = 0; i < size; i += 1)
-    {
-        if (A[i] != result[i])
+        cl_event event;
+        const auto start_1 = std::chrono::high_resolution_clock::now();
+        if (is_event_sync_mode)
         {
-            cnt += 1;
+            err = clEnqueueCopyBuffer(queue_1, bufA, shared_mem, 0, 0, size, 0, nullptr, &event);
+            clWaitForEvents(1, &event);
         }
-    }
-    printf("GPU P2P between different gpu devices: %s(%.3f)\n", cnt == 0 ? "SUCCESS" : "FAIL", 1.0 * cnt / size);
-
-    // Set the kernel arguments
-    clSetKernelArg(kernel, 0, sizeof(cl_mem), &bufB);
-    clSetKernelArg(kernel, 1, sizeof(cl_mem), &bufC);
-    clSetKernelArg(kernel, 2, sizeof(cl_mem), &bufD);
-    // Execute the kernel
-    size_t globalSize[1] = {size};
-    const auto start_2 = std::chrono::high_resolution_clock::now();
-    if (is_event_sync_mode)
-    {
-        err = clEnqueueNDRangeKernel(queue_2, kernel, 1, nullptr, globalSize, nullptr, 1, &event, nullptr);
-        clFinish(queue_2);
-    }
-    else
-    {
-        err = clEnqueueNDRangeKernel(queue_2, kernel, 1, nullptr, globalSize, nullptr, 0, nullptr, nullptr);
-        clFinish(queue_2);
-    }
-    const auto end_2 = std::chrono::high_resolution_clock::now();
-    const std::chrono::duration<double, std::milli> elapsed_2 = end_2 - start_2;
-    std::cout << "Add time: " << elapsed_2.count() << " ms, size = " << size / 1024 << "KB" << std::endl;
-    CHECK_OCL_ERROR_EXIT(err, "clEnqueueNDRangeKernel failed");
-
-    err = clEnqueueReadBuffer(queue_2, bufD, CL_TRUE, 0, sizeof(int8_t) * size, result.data(), 0, nullptr, nullptr);
-    CHECK_OCL_ERROR_EXIT(err, "clEnqueueReadBuffer failed");
-
-    cnt = 0;
-    for (size_t i = 0; i < size; i += 1)
-    {
-        if (A[i] + C[i] != result[i])
+        else
         {
-            cnt += 1;
+            err = clEnqueueCopyBuffer(queue_1, bufA, shared_mem, 0, 0, size, 0, nullptr, nullptr);
+            clFinish(queue_1);
         }
-    }
+        CHECK_OCL_ERROR_EXIT(err, "clEnqueueCopyBuffer failed");
 
-    if (is_event_sync_mode)
-    {
-        printf("Use event to sync queues between different gpu devices: %s(%.3f)\n\n", cnt == 0 ? "SUCCESS" : "FAIL", 1.0 * cnt / size);
+        const auto end_1 = std::chrono::high_resolution_clock::now();
+        const std::chrono::duration<double, std::milli> elapsed_1 = end_1 - start_1;
+        bandwidth += size / 1024.0 / 1024 / 1024 / elapsed_1.count() * 1000;
+        std::cout << "\tP2P copy " << loop << " : time = " << elapsed_1.count() << " ms, size = " << size / 1024 << " KB, BandWidth = " << size / 1024.0 / 1024 / 1024 / elapsed_1.count() * 1000 << " GB/s" << std::endl;
     }
-    else
-    {
-        printf("Use clFinish to sync queues between different gpu devices: %s(%.3f)\n\n", cnt == 0 ? "SUCCESS" : "FAIL", 1.0 * cnt / size);
-    }
-
+    std::cout << "GPU P2P bandwidth: " << bandwidth/loop_cnt << " GB/s" << std::endl;
+    // release here after all tasks has been done.
     clReleaseMemObject(bufA);
     clReleaseMemObject(bufB);
-    clReleaseMemObject(bufC);
-    clReleaseMemObject(bufD);
-    clReleaseKernel(kernel);
-    clReleaseProgram(program);
+    clReleaseMemObject(shared_mem);
     clReleaseCommandQueue(queue_1);
     clReleaseCommandQueue(queue_2);
     clReleaseContext(context_1);
@@ -346,32 +315,25 @@ void run_queue_sync_test(bool is_event_sync_mode, size_t bytes_size, cl_device_i
 int main(int argc, char **argv)
 {
     int cnt = 1;
+    int th_cnt = 1;
     if (argc < 4) {
-         std::cout << "app_name <gpu_id> <gpu_id> <mem_size MB> <loop_cnt>" << std::endl;
+         std::cout << "app_name <gpu_id> <gpu_id> <mem_size MB>" << std::endl;
          return 0;
     }
     int gpu_0 = atoi(argv[1]);
     int gpu_1 = atoi(argv[2]);
-    size_t bytes = atoi(argv[3]) * 1024 * 1024;
-    
-    if(argc==5)
-        cnt = atoi(argv[4]);
+    size_t bytes = atoi(argv[3]);
+    bytes = bytes * 1024 * 1024;
 
-    cl_device_id device_1 = choose_ocl_device(gpu_0);
-    cl_device_id device_2 = choose_ocl_device(gpu_1);
+    cl_device_id device_0 = choose_ocl_device(gpu_0);
+    cl_device_id device_1 = choose_ocl_device(gpu_1);
     std::cout << std::endl
               << std::endl;
-    for (int k = 0; k < cnt; k++)
-    {
-        // Test queue sync between different contexts
-        std::cout << "Loop count: " << k << " ......................" << std::endl;
-        std::cout << "GPU index: " << gpu_0 << "-->" << gpu_1 << std::endl;
-        run_queue_sync_test(0, bytes, device_1, device_2); // manual sync(clFinish) will sucess
-        std::cout << "GPU index: " << gpu_1 << "-->" << gpu_0 << std::endl;
-        run_queue_sync_test(0, bytes, device_2, device_1); // manual sync(clFinish) will sucess
-        // run_queue_sync_test(1, bytes, device_1, device_2); // cl_event sync will fail
-        std::cout << std::endl;
-    }
+
+    std::cout << "GPU index: " << gpu_0 << "-->" << gpu_1 << std::endl;
+    std::cout << "size = " << bytes/1024 << " KB" << std::endl;
+    test_gpu_bandwidth(1, device_0, bytes);
+    test_p2p_bandwidth(1, bytes, device_0, device_1);
 
     return 1;
 }
